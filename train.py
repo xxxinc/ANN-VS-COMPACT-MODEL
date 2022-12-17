@@ -19,7 +19,7 @@ class ANNModel(nn.Module):
         # Linear function 2: 16 --> 32
         self.fc2 = nn.Linear(hidden_dim[0], hidden_dim[1])
         # Non-linearity 2
-        self.tanh2 = nn.ReLU(inplace=False)
+        self.tanh2 = nn.Tanh()
         
         # Linear function 3 (readout): 32 --> 1
         self.fc3 = nn.Linear(hidden_dim[1], output_dim)  
@@ -47,44 +47,65 @@ class MSE3Loss(nn.Module):
     def __init__(self,weight=None,size_average=True):
         super(MSE3Loss,self).__init__()
         
-    def forward(self, logipre, gmpre, gdpre, labels, a1, a2):
-        logipre0 = logipre.clone()
+    def forward(self, epspre, gmpre, gdpre, labels, a1, a2):
+    #def forward(self, epspre,labels):
+        epspre0 = epspre.clone()
         gmpre0 = gmpre.clone()
         gdpre0 = gdpre.clone()
-        logitar = labels[:,0].clone()
+        epstar = labels[:,0].clone()
         gmtar = labels[:,1].clone()
         gdtar = labels[:,2].clone()
-        loss = 1/3 * torch.mean((logipre0 - logitar)**2 + a1 * torch.mean((gmpre0 - gmtar)**2) + a2 * torch.mean((gdpre0 - gdtar)**2))
+        gmvstar = labels[:,3].clone()
+        gdvstar = labels[:,4].clone()
+        idvstar = labels[:,5].clone()
+
+        loss = 1/3 * torch.mean((epspre0 - epstar)**2 + a1 * torch.mean(((gmpre0*idvstar + gmvstar*epspre0) - gmtar)**2) + a2 * torch.mean(((gdpre0*idvstar + gdvstar*epspre0) - gdtar)**2))
+        #loss = torch.mean((epspre0 - epstar)**2)
         return loss
 
 def pre_data(dir, train_or_test, device):
-    para_numpy, ids_numpy,gm_numpy, gd_numpy, vdd, vlin, features_name, lowerbound, upperbound = get_data(dir, train_or_test)
+    para_numpy, eps_numpy, gm_numpy, gd_numpy,  gm_vs_numpy, gd_vs_numpy, id_vs_numpy, vdd, vlin, features_name, lowerbound, upperbound = get_data(dir, train_or_test)
     # 需要注意的是features的最后两个参数是vd，不作为神经网络的输入，但是还是具有作用
     # 转化为float32
     features_numpy = para_numpy[:,0:len(features_name)+2].astype(np.float32) 
     print(len(features_numpy))
-    vgvd_numpy = para_numpy[:,len(features_name)+2:].astype(np.float32) 
 
-    ids_numpy = (np.log10(np.abs(ids_numpy))).astype(np.float32) 
+    # vgvd_numpy = para_numpy[:,len(features_name)+2:-1].astype(np.float32) 
+    # index_file = para_numpy[:,-1] #TCAD数据的标签
+    
+    eps_numpy = eps_numpy.astype(np.float32)
     gm_numpy = gm_numpy.astype(np.float32)
     gd_numpy = gd_numpy.astype(np.float32)
-    ids_numpy = ids_numpy.reshape(-1,1) #转变位列向量
+    gm_vs_numpy = gm_vs_numpy.astype(np.float32)
+    gd_vs_numpy = gd_vs_numpy.astype(np.float32)
+    id_vs_numpy = id_vs_numpy.astype(np.float32)
+
+    eps_numpy = eps_numpy.reshape(-1,1) #转变位列向量
     gm_numpy = gm_numpy.reshape(-1,1)
     gd_numpy = gd_numpy.reshape(-1,1)
+    gm_vs_numpy = gm_vs_numpy.reshape(-1,1)
+    gd_vs_numpy = gd_vs_numpy.reshape(-1,1)
+    id_vs_numpy = id_vs_numpy.reshape(-1,1)
 
+    print(eps_numpy.size)
     print(gm_numpy.size)
     print(gd_numpy.size)
-    targets_numpy = []
-    for i in range(len(ids_numpy)):
-        inter =[ids_numpy[i][0],gm_numpy[i][0],gd_numpy[i][0]]
-        targets_numpy.append(inter)
-    targets_numpy = np.array(targets_numpy)
+    print(gm_vs_numpy.size)
+    print(gd_vs_numpy.size)
+    print(id_vs_numpy.size)
+
+    targets_list = []  #为了确保跨导电导的数据在之后可以被找到，需要和eps一同放入label中
+    for i in range(len(eps_numpy)):
+        inter =[eps_numpy[i][0],gm_numpy[i][0],gd_numpy[i][0],gm_vs_numpy[i][0],gd_vs_numpy[i][0],id_vs_numpy[i][0]]
+        targets_list.append(inter)
+    targets_numpy = np.array(targets_list)
     print(len(targets_numpy))
+
     # create feature and targets tensor for train set. As you remember we need variable to accumulate gradients. Therefore first we create tensor, then we will create variable
     features = torch.from_numpy(features_numpy).to(device)
     targets = torch.from_numpy(targets_numpy).to(device)
     # print('features.shape:',features.shape,'targets.shape:',targets.shape)
-    return features, targets, vgvd_numpy, vdd, vlin, features_name, lowerbound, upperbound
+    return features, targets, vdd, vlin, features_name, lowerbound, upperbound
 
 def get_derivate(feature, dv):
     '''
@@ -92,26 +113,26 @@ def get_derivate(feature, dv):
         gm is tran-con, relate to vgs
         gd is conduct-, relate to vds
         u1 = 2 * vgs - vds
-        u2 = log(vds^2)
+        u2 = vds^2
     '''
-    gm = feature
-    gd = feature
+    gm = feature.clone()
+    gd = feature.clone()
     u1_gm = gm[:,-2] + 2*dv
     gm[:,-2] = u1_gm
 
     u1_gd = gd[:,-2] - dv
-    u2_gd = torch.log10((torch.pow(10,(gd[:,-1] * 0.5)) + dv)**2)
+    u2_gd = torch.pow((torch.sqrt(gd[:,-1]) + dv), 2)
     gd[:,-2] = u1_gd
     gd[:,-1] = u2_gd
     return gm, gd
 
-if __name__ == '__main__':   
+def train_main(dir0):
     #GPU
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    dir = 'EDA2022\GAA_data'
+    dir = dir0
 
-    features_train, targets_train, vgvd_numpy_train, vdd_train, vlin_train, features_name_train, lowerbound_train, upperbound_train = pre_data(dir, 0, device)
-    features_test, targets_test, vgvd_numpy_test, vdd_test, vlin_test, features_name_test, lowerbound_test, upperbound_test = pre_data(dir, 1, device)
+    features_train, targets_train, vdd_train, vlin_train, features_name_train, lowerbound_train, upperbound_train = pre_data(dir, 0, device)
+    features_test, targets_test, vdd_test, vlin_test, features_name_test, lowerbound_test, upperbound_test = pre_data(dir, 1, device)
     # batch_size, epoch and iteration
     batch_size = 100
     #n_iters = 10000
@@ -146,7 +167,7 @@ if __name__ == '__main__':
     accuracy_list = []
   
     for epoch in range(num_epochs):
-        for i, (train, labels) in enumerate(train_loader):
+        for i, (train, train_target) in enumerate(train_loader):
             
             # Clear gradients
             optimizer.zero_grad()
@@ -164,11 +185,12 @@ if __name__ == '__main__':
             # Calculate softmax and ross entropy loss
             a = 1 #分布描述跨导、电导在损失函数中的重要性
             b = 1
-            loss = error(outputs,gmpre,gdpre,labels,1,1)
-            
+            loss = error(outputs,gmpre,gdpre,train_target,a,b)
+            #loss = error(outputs,train_target)
             # Calculating gradients
-            loss.backward(retain_graph=True)
-            
+            #loss.backward(retain_graph=True)
+            loss.backward()
+
             # Update parameters
             optimizer.step()
             
@@ -179,15 +201,23 @@ if __name__ == '__main__':
                 correct = 0
                 total = 0
                 # Predict test dataset
-                for test, labels in test_loader:
+                test_output0 = 0
+                test_target0 = 0
+                for test, test_target in test_loader:
                     
                     # Forward propagation
                     outputs = model(test)
                     
                     total = total + len(outputs)
-                    comp = outputs / labels
+                    # for ii in range(1):
+                    #     print('test_output:', outputs[ii], ' test_target:',test_target[ii,0])
+
+                    comp = torch.abs((test_target[:,0] - outputs)/ test_target[:,0])
                     # Total correct predictions
                     correct = correct + comp.sum()
+
+                    test_output0 = outputs[0]
+                    test_target0 = test_target[0,0]
                 
                 accuracy = correct / int(total)
                 
@@ -197,9 +227,19 @@ if __name__ == '__main__':
                 accuracy_list.append(accuracy)
                 if count % 500 == 0:
                     # Print Loss
-                    print('Iteration: {}  Loss: {}  Accuracy: {} %'.format(count, loss.data, accuracy))
 
-    # ANN model testing   
+                    print('Iteration: {}  Loss: {}  Accuracy: {} %'.format(count, loss.data, accuracy))
+                    print('test_output:',test_output0,' test_target:',test_target0)
+
+if __name__ == '__main__':   
+    dir = r'C:\Users\xxxin\Documents\GitHub\DataBase\EDA2022\GAA_data'
+    train_main(dir)
+    
+    # loss_list = np.array(loss_list)
+    # iteration_list = np.array(iteration_list)
+    # np.savetxt('loss_list_train2.txt',loss_list)
+    # np.savetxt('iteration_list_train2.txt',iteration_list)
+
     ''' 
     targets_list = []
     predict_list = []
@@ -218,7 +258,3 @@ if __name__ == '__main__':
     df_test = pd.DataFrame({'targets':targets_list,'predict':predict_list,'loss':test_loss_list})
     df_test.to_csv('test_output.csv',index = False)
     '''
-    loss_list = np.array(loss_list)
-    iteration_list = np.array(iteration_list)
-    np.savetxt('loss_list_train2.txt',loss_list)
-    np.savetxt('iteration_list_train2.txt',iteration_list)
